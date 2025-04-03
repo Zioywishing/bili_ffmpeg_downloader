@@ -43,7 +43,6 @@ jobs:
       - name: Build for Windows (amd64)
         run: |
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe main.go
-          zip -j dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.zip dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe
 
       # - name: Build for macOS (amd64)
       #   run: |
@@ -58,7 +57,7 @@ jobs:
       - name: Create Release and Upload Assets
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "dist/*.zip,dist/*.tar.gz"
+          artifacts: "dist/*.exe"
           token: ${{ secrets.GITHUB_TOKEN }}
           # 使用 'dev-' + 短 SHA 作为 tag
           tag: dev-${{ steps.vars.outputs.short_sha }}
