@@ -16,6 +16,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: 调试工作目录
+        run: |
+          echo "当前工作目录:"
+          pwd
+          echo "列出工作目录内容:"
+          ls -la
+          echo "查看main.go是否存在:"
+          test -f main.go && echo "main.go存在" || echo "main.go不存在"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -43,6 +52,13 @@ jobs:
       - name: Build for Windows (amd64)
         run: |
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe main.go
+          
+      - name: 检查构建文件
+        run: |
+          echo "检查dist目录内容:"
+          ls -la dist/
+          echo "二进制文件是否存在:"
+          test -f dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe && echo "文件存在" || echo "文件不存在"
 
       # - name: Build for macOS (amd64)
       #   run: |
@@ -61,9 +77,9 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           # 使用 'dev-' + 短 SHA 作为 tag
           tag: dev-${{ steps.vars.outputs.short_sha }}
-          # 更新发布名称以使用短 SHA
           name: Development Build dev-${{ steps.vars.outputs.short_sha }}
           body: "Automated build from push to main (commit ${{ github.sha }} - short: ${{ steps.vars.outputs.short_sha }})"
           draft: false
-          # 将这些自动构建标记为预发布版本
-          prerelease: true 
+          prerelease: false
+          allowUpdates: true
+          removeArtifacts: true 
