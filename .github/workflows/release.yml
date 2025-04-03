@@ -24,8 +24,10 @@ jobs:
       - name: Set up build variables
         id: vars
         run: |
-          # 使用 commit SHA 作为版本标识符
-          VERSION=${{ github.sha }}
+          # 使用 commit SHA 的短版本作为标识符
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          VERSION="dev-$SHORT_SHA"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           # 定义二进制文件名 (可以自定义)
           BINARY_NAME="ffmpeg_downloader"
@@ -33,36 +35,36 @@ jobs:
           # 创建输出目录
           mkdir -p dist
 
-      - name: Build for Linux (amd64)
-        run: |
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-linux-amd64 main.go
-          tar -czvf dist/${{ steps.vars.outputs.binary_name }}-linux-amd64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-linux-amd64
+      # - name: Build for Linux (amd64)
+      #   run: |
+      #     GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-linux-amd64 main.go
+      #     tar -czvf dist/${{ steps.vars.outputs.binary_name }}-linux-amd64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-linux-amd64
 
       - name: Build for Windows (amd64)
         run: |
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe main.go
           zip -j dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.zip dist/${{ steps.vars.outputs.binary_name }}-windows-amd64.exe
 
-      - name: Build for macOS (amd64)
-        run: |
-          GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-macos-amd64 main.go
-          tar -czvf dist/${{ steps.vars.outputs.binary_name }}-macos-amd64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-macos-amd64
+      # - name: Build for macOS (amd64)
+      #   run: |
+      #     GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-macos-amd64 main.go
+      #     tar -czvf dist/${{ steps.vars.outputs.binary_name }}-macos-amd64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-macos-amd64
 
-      - name: Build for macOS (arm64)
-        run: |
-          GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-macos-arm64 main.go
-          tar -czvf dist/${{ steps.vars.outputs.binary_name }}-macos-arm64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-macos-arm64
+      # - name: Build for macOS (arm64)
+      #   run: |
+      #     GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o dist/${{ steps.vars.outputs.binary_name }}-macos-arm64 main.go
+      #     tar -czvf dist/${{ steps.vars.outputs.binary_name }}-macos-arm64.tar.gz -C dist ${{ steps.vars.outputs.binary_name }}-macos-arm64
 
       - name: Create Release and Upload Assets
         uses: ncipollo/release-action@v1
         with:
           artifacts: "dist/*.zip,dist/*.tar.gz"
           token: ${{ secrets.GITHUB_TOKEN }}
-          # 使用 commit SHA 作为 tag，使其对每次推送都唯一
-          tag: ${{ github.sha }}
-          # 更新发布名称以表明是开发构建
-          name: Development Build ${{ github.sha }}
-          body: "Automated build from push to main (commit ${{ github.sha }})"
+          # 使用 'dev-' + 短 SHA 作为 tag
+          tag: dev-${{ steps.vars.outputs.short_sha }}
+          # 更新发布名称以使用短 SHA
+          name: Development Build dev-${{ steps.vars.outputs.short_sha }}
+          body: "Automated build from push to main (commit ${{ github.sha }} - short: ${{ steps.vars.outputs.short_sha }})"
           draft: false
           # 将这些自动构建标记为预发布版本
           prerelease: true 
