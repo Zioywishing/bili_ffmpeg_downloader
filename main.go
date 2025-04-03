@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -16,10 +17,25 @@ import (
 	"time"
 )
 
+// Define a client with a timeout
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second, // 30-second timeout
+}
+
 func createCache() {
 	cacheDir := filepath.Join(".", ".cache")
+	fmt.Println("尝试创建缓存目录:", cacheDir)
 	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
-		os.MkdirAll(cacheDir, 0755)
+		err := os.MkdirAll(cacheDir, 0755)
+		if err != nil {
+			fmt.Println("创建缓存目录失败:", err)
+			// Decide if you want to exit here or let downloadFile handle it
+			// os.Exit(1)
+			return // Return early if creation fails
+		}
+		fmt.Println("缓存目录创建成功")
+	} else {
+		fmt.Println("缓存目录已存在")
 	}
 }
 
@@ -112,49 +128,131 @@ type downloadRecord struct {
 	bytes     int
 }
 
-func downloadFile(url, fileName string) (string, error) {
-	if fileName == "" {
-		fileName = fmt.Sprintf("%s.m4s", randomName())
+type ProgressInfo struct {
+	Percentage   float64
+	DownloadedMB float64
+	TotalMB      float64
+	SpeedMBps    float64
+	ProgressBar  string
+}
+
+// CurlInput holds the parsed URL and headers from a cURL command string.
+type CurlInput struct {
+	URL     string
+	Headers map[string]string
+}
+
+// parseCurlCommand extracts the URL and headers from a cURL-like command string.
+func parseCurlCommand(rawInput string) (CurlInput, error) {
+	var result CurlInput
+	result.Headers = make(map[string]string)
+
+	// Regex to find the URL (typically the first argument, possibly quoted)
+	// This regex tries to capture the content within the first pair of single or double quotes,
+	// or the first non-flag argument if not quoted.
+	urlRegex := regexp.MustCompile(`curl\s+(?:'([^']*)'|"([^"]*)"|(\S+))`)
+	urlMatches := urlRegex.FindStringSubmatch(rawInput)
+	if len(urlMatches) < 2 {
+		return result, errors.New("无法解析 URL")
+	}
+	// The actual URL will be in one of the capturing groups
+	for i := 1; i < len(urlMatches); i++ {
+		if urlMatches[i] != "" {
+			result.URL = urlMatches[i]
+			break
+		}
+	}
+	if result.URL == "" {
+		return result, errors.New("未能从输入中提取 URL")
 	}
 
+	// Regex to find all headers (-H 'key: value' or -H "key: value")
+	headerRegex := regexp.MustCompile(`-H\s+'([^']*)'|-H\s+"([^"]*)"`)
+	headerMatches := headerRegex.FindAllStringSubmatch(rawInput, -1)
+
+	for _, match := range headerMatches {
+		// The actual header string is in the second or third capturing group
+		headerStr := ""
+		if len(match) > 1 && match[1] != "" {
+			headerStr = match[1]
+		} else if len(match) > 2 && match[2] != "" {
+			headerStr = match[2]
+		}
+
+		if headerStr != "" {
+			parts := strings.SplitN(headerStr, ":", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				result.Headers[key] = value
+			}
+		}
+	}
+
+	// Add a default User-Agent if not provided, as some servers require it.
+	if _, exists := result.Headers["User-Agent"]; !exists {
+		result.Headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+	}
+
+	return result, nil
+}
+
+// downloadFile downloads a file from a URL with custom headers and reports progress.
+func downloadFile(url, fileName string, headers map[string]string, progressChan chan<- ProgressInfo) (string, error) {
+	fmt.Printf("下载函数启动: URL=%s, FileName=%s\n", url, fileName)
+	if fileName == "" {
+		fileName = fmt.Sprintf("%s.m4s", randomName())
+		fmt.Println("生成随机文件名:", fileName)
+	}
+
+	fmt.Println("准备 HTTP 请求...")
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
+		fmt.Println("创建 HTTP 请求失败:", err)
 		return "", err
 	}
 
 	// 设置请求头
-	req.Header.Set("accept", "*/*")
-	req.Header.Set("accept-language", "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6")
-	req.Header.Set("sec-ch-ua", "\"Microsoft Edge\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", "\"Windows\"")
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("sec-fetch-mode", "cors")
-	req.Header.Set("sec-fetch-site", "cross-site")
-	req.Header.Set("Referer", "https://www.bilibili.com/video/BV1CqizYmEWG/?spm_id_from=333.1387.upload.video_card.click&vd_source=f4b11eff4d5b11ae41cb4e0ca94e674b")
-	req.Header.Set("Referrer-Policy", "no-referrer-when-downgrade")
+	fmt.Println("设置请求头 (忽略 Range): ")
+	for key, value := range headers {
+		// 忽略 Range 请求头以确保下载完整文件
+		if strings.EqualFold(key, "Range") {
+			fmt.Printf("  忽略 Header: %s = %s\n", key, value)
+			continue
+		}
+		fmt.Printf("  设置 Header: %s = %s\n", key, value)
+		req.Header.Set(key, value)
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	fmt.Println("发起 HTTP 请求 (带超时)...")
+	resp, err := httpClient.Do(req) // Use the client with timeout
 	if err != nil {
+		fmt.Println("HTTP 请求失败:", err)
 		return "", err
 	}
 	defer resp.Body.Close()
+	fmt.Println("HTTP 响应状态码:", resp.StatusCode)
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent { // Allow Partial Content for range requests
+		fmt.Printf("HTTP 错误! 状态码: %d\n", resp.StatusCode)
 		return "", fmt.Errorf("HTTP error! status: %d", resp.StatusCode)
 	}
 
 	totalSize, _ := strconv.ParseInt(resp.Header.Get("content-length"), 10, 64)
+	fmt.Printf("预期内容长度: %d 字节\n", totalSize)
 	var downloadedSize int64 = 0
 
 	// 用于记录过去一秒内的下载数据点
 	downloadRecords := []downloadRecord{}
 
+	fmt.Println("尝试创建本地文件:", fileName)
 	file, err := os.Create(fileName)
 	if err != nil {
+		fmt.Println("创建文件失败:", err)
 		return "", err
 	}
 	defer file.Close()
+	fmt.Println("文件创建成功，开始读取响应体...")
 
 	buf := make([]byte, 32*1024) // 32KB buffer
 	for {
@@ -195,15 +293,22 @@ func downloadFile(url, fileName string) (string, error) {
 			// 计算速度和进度
 			speedPerSecond := float64(totalBytesInLastSecond) / timeSpan
 			progress := float64(downloadedSize) / float64(totalSize) * 100
-			progressBarWidth := 50
+			progressBarWidth := 30
 			filledWidth := int(math.Round((progress / 100) * float64(progressBarWidth)))
 			progressBar := strings.Repeat("█", filledWidth) + strings.Repeat("░", progressBarWidth-filledWidth)
 			speedInMB := speedPerSecond / 1024 / 1024
 			downloadedMB := float64(downloadedSize) / 1024 / 1024
 			totalMB := float64(totalSize) / 1024 / 1024
 
-			fmt.Printf("\r下载进度: [%s] %.2f%% | %.2fMB/%.2fMB | 速度: %.2f MB/s",
-				progressBar, progress, downloadedMB, totalMB, speedInMB)
+			// 发送进度信息到通道
+			progressInfo := ProgressInfo{
+				Percentage:   progress,
+				DownloadedMB: downloadedMB,
+				TotalMB:      totalMB,
+				SpeedMBps:    speedInMB,
+				ProgressBar:  progressBar,
+			}
+			progressChan <- progressInfo
 		}
 
 		if err != nil {
@@ -214,22 +319,16 @@ func downloadFile(url, fileName string) (string, error) {
 		}
 	}
 
-	fmt.Print("\r下载完成                                                                                           \n")
+	// 关闭通道，表示下载完成
+	close(progressChan)
 	return fileName, nil
-}
-
-func fetchAudio() string {
-	return "https://xy182x201x240x114xy.mcdn.bilivideo.cn:8082/v1/resource/1661773258-1-30280.m4s?agrr=1&build=0&buvid=0646A41D-842F-4797-C129-303CFCA3C80966489infoc&bvc=vod&bw=94798&deadline=1743672270&dl=0&e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M%3D&f=u_0_0&gen=playurlv3&mcdnid=50022323&mid=40870994&nbs=1&nettype=0&og=hw&oi=1882261075&orderid=0%2C3&os=mcdn&platform=pc&sign=71d046&tag=&traceid=trAPOAGiYmSqIa_0_e_N&uipk=5&uparams=e%2Cnbs%2Coi%2Cgen%2Cos%2Cplatform%2Cmid%2Cdeadline%2Ctag%2Cog%2Ctrid%2Cuipk&upsig=538328095487b62e8dd868ad1934d536"
-}
-
-func fetchVideo() string {
-	return "https://xy125x44x163x200xy.mcdn.bilivideo.cn:4483/upgcxcode/58/32/1661773258/1661773258-1-100029.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&trid=0000700670a9d42e4656a34e6d177be5d31u&deadline=1743672270&nbs=1&uipk=5&gen=playurlv3&os=mcdn&oi=1882261075&platform=pc&mid=40870994&tag=&og=hw&upsig=a77f42745badf7e879db3e9ed1067032&uparams=e,trid,deadline,nbs,uipk,gen,os,oi,platform,mid,tag,og&mcdnid=50022323&bvc=vod&nettype=0&bw=4589659&f=u_0_0&agrr=1&buvid=0646A41D-842F-4797-C129-303CFCA3C80966489infoc&build=0&dl=0&orderid=0,3"
 }
 
 func main() {
 	// 初始化随机数生成器
 	rand.Seed(time.Now().UnixNano())
 
+	// 获取输出文件名
 	args := os.Args[1:]
 	var movieName string
 	if len(args) > 0 {
@@ -238,9 +337,64 @@ func main() {
 		movieName = filepath.Join(".", "download", randomName()+".mp4")
 	}
 
+	// 用于从控制台读取输入
+	reader := bufio.NewReader(os.Stdin)
+
+	// Helper function to read multi-line input
+	readMultiLineInput := func(prompt string) (string, error) {
+		fmt.Println(prompt)
+		var lines []string
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil && err != io.EOF {
+				return "", err
+			}
+			trimmedLine := strings.TrimSpace(line)
+			// Stop reading on empty line
+			if trimmedLine == "" {
+				break
+			}
+			// Remove trailing backslash if present (common in copied cURL commands)
+			if strings.HasSuffix(trimmedLine, "\\") {
+				trimmedLine = strings.TrimSuffix(trimmedLine, "\\")
+				trimmedLine = strings.TrimSpace(trimmedLine) // Trim again after removing backslash
+			}
+			lines = append(lines, trimmedLine)
+			if err == io.EOF {
+				break // End if EOF is reached
+			}
+		}
+		// Join lines with spaces to form a single command string
+		return strings.Join(lines, " "), nil
+	}
+
+	// 获取视频 cURL 命令
+	videoCurlInputStr, err := readMultiLineInput("请输入视频流的 cURL 命令 (输入空行结束):")
+	if err != nil {
+		fmt.Println("读取视频命令时出错:", err)
+		os.Exit(1)
+	}
+	videoInput, err := parseCurlCommand(videoCurlInputStr)
+	if err != nil {
+		fmt.Println("解析视频 cURL 命令失败:", err)
+		os.Exit(1)
+	}
+
+	// 获取音频 cURL 命令
+	audioCurlInputStr, err := readMultiLineInput("请输入音频流的 cURL 命令 (输入空行结束):")
+	if err != nil {
+		fmt.Println("读取音频命令时出错:", err)
+		os.Exit(1)
+	}
+	audioInput, err := parseCurlCommand(audioCurlInputStr)
+	if err != nil {
+		fmt.Println("解析音频 cURL 命令失败:", err)
+		os.Exit(1)
+	}
+
 	try := func(f func() error) {
 		if err := f(); err != nil {
-			fmt.Println("下载出错:", err)
+			fmt.Println("执行出错:", err)
 			os.Exit(1)
 		}
 	}
@@ -248,17 +402,115 @@ func main() {
 	try(func() error {
 		createCache()
 
-		videoFilePath, err := downloadFile(fetchVideo(), filepath.Join(".", ".cache", randomName()+".m4s"))
-		if err != nil {
-			return err
+		videoProgressChan := make(chan ProgressInfo)
+		audioProgressChan := make(chan ProgressInfo)
+
+		var videoFilePath, audioFilePath string
+		var videoErr, audioErr error
+
+		fmt.Println("开始下载音频和视频...")
+
+		// 启动视频下载goroutine
+		fmt.Println("准备启动视频下载 goroutine...")
+		go func() {
+			fmt.Println("视频下载 goroutine 已启动")
+			videoFilePath, videoErr = downloadFile(
+				videoInput.URL,
+				filepath.Join(".", ".cache", randomName()+".m4s"),
+				videoInput.Headers,
+				videoProgressChan,
+			)
+		}()
+
+		// 启动音频下载goroutine
+		fmt.Println("准备启动音频下载 goroutine...")
+		go func() {
+			fmt.Println("音频下载 goroutine 已启动")
+			audioFilePath, audioErr = downloadFile(
+				audioInput.URL,
+				filepath.Join(".", ".cache", randomName()+".m4s"),
+				audioInput.Headers,
+				audioProgressChan,
+			)
+		}()
+
+		// 跟踪最后一次打印的进度
+		lastAudioProgress := ProgressInfo{}
+		lastVideoProgress := ProgressInfo{}
+		audioComplete := false
+		videoComplete := false
+
+		// 创建一个函数来打印进度
+		printProgress := func() {
+			// 使用回车符返回行首，然后清除当前行
+			fmt.Print("\r\033[K")
+
+			// 打印音频进度
+			audioStatus := "音频: "
+			if audioComplete {
+				audioStatus += "下载完成!"
+			} else if lastAudioProgress.ProgressBar != "" {
+				audioStatus += fmt.Sprintf("[%s] %.2f%% | %.2fMB/%.2fMB | %.2f MB/s",
+					lastAudioProgress.ProgressBar, lastAudioProgress.Percentage,
+					lastAudioProgress.DownloadedMB, lastAudioProgress.TotalMB,
+					lastAudioProgress.SpeedMBps)
+			} else {
+				audioStatus += "等待中..."
+			}
+
+			// 打印视频进度
+			videoStatus := "视频: "
+			if videoComplete {
+				videoStatus += "下载完成!"
+			} else if lastVideoProgress.ProgressBar != "" {
+				videoStatus += fmt.Sprintf("[%s] %.2f%% | %.2fMB/%.2fMB | %.2f MB/s",
+					lastVideoProgress.ProgressBar, lastVideoProgress.Percentage,
+					lastVideoProgress.DownloadedMB, lastVideoProgress.TotalMB,
+					lastVideoProgress.SpeedMBps)
+			} else {
+				videoStatus += "等待中..."
+			}
+
+			// 在一行内打印两者的状态，用足够的空格分隔
+			fmt.Printf("%s | %s", audioStatus, videoStatus)
 		}
 
-		audioFilePath, err := downloadFile(fetchAudio(), filepath.Join(".", ".cache", randomName()+".m4s"))
-		if err != nil {
-			return err
+		for !audioComplete || !videoComplete {
+			select {
+			case progress, ok := <-audioProgressChan:
+				if ok {
+					lastAudioProgress = progress
+					printProgress()
+				} else {
+					audioProgressChan = nil
+					audioComplete = true
+					lastAudioProgress.Percentage = 100
+					printProgress()
+				}
+			case progress, ok := <-videoProgressChan:
+				if ok {
+					lastVideoProgress = progress
+					printProgress()
+				} else {
+					videoProgressChan = nil
+					videoComplete = true
+					lastVideoProgress.Percentage = 100
+					printProgress()
+				}
+			}
 		}
 
-		_, err = combineAudioAndVideo(videoFilePath, audioFilePath, movieName)
+		fmt.Println("\n\n下载完成，开始合并音视频...")
+
+		if videoErr != nil {
+			return videoErr
+		}
+
+		if audioErr != nil {
+			return audioErr
+		}
+
+		_, err := combineAudioAndVideo(videoFilePath, audioFilePath, movieName)
 		if err != nil {
 			return err
 		}
